@@ -26,29 +26,29 @@ def run_training() -> None:
 
     # Split data into train and test
     X_train, X_test, y_train, y_test = train_test_split(
-        data[config.model_config.features],
-        data[config.model_config.target],
-        test_size=config.model_config.test_size,
-        random_state=config.model_config.random_state, 
-        stratify=data[config.model_config.target]
+        data[config.ml_model_config.features],
+        data[config.ml_model_config.target],
+        test_size=config.ml_model_config.test_size,
+        random_state=config.ml_model_config.random_state, 
+        stratify=data[config.ml_model_config.target]
     )
 
-    # Train the model
+    
     classification_pipe.fit(X_train, y_train)
 
-    # Evaluate the model
+    
     y_pred = classification_pipe.predict(X_test)
     y_pred_proba = classification_pipe.predict_proba(X_test)[:, 1]
 
-    #Print evaluation metrics
+    
     print(classification_report(y_test, y_pred))
     print(f"ROC AUC Score: {roc_auc_score(y_test, y_pred_proba):.4f}")
 
 
-    # Persist the trained model
+    
     save_pipeline(pipeline_to_persist=classification_pipe) 
     print(f"Model trained and saved successfully. Version: {_version}")
 
-    if __name__ == "__main__":
-        run_training()
+if __name__ == "__main__":
+    run_training()
         

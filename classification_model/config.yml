@@ -1,63 +1,62 @@
-package_name: classification_model
-model_name: CatBoostClassifier
-model_type: CatBoost
+# Application Configuration
+app_config:
+  package_name: classification_model
+  training_data_file: Dataset.csv
+  pipeline_name: catboost_classification_model
+  pipeline_save_file: catboost_model_output_v
 
-training_data_file: Dataset.csv
-
-target: FIN_JGMT 
-
-pipeline_name: catboost_classification_model
-pipeline_save_file: catboost_model_output_v 
-
-features: 
-  - DV_R
-  - DA_R 
-  - AV_R 
-  - AA_R 
-  - PM_R 
-
-categorical_features: []
-
-# MOdel parameters
-test_size: 0.2
-random_state: 42 
-
-# CatBoost parameters
-catboost_params:
-  iterations: 1000
-  learning_rate: 0.1
-  depth: 6
-  l2_leaf_reg: 3
-  random_seed: 42
-  border_count: 128
-  thread_count: -1 
-  verbose: False
-  eval_metric: 'AUC'
-  early_stopping_rounds: 100 
-
-  # Validation parameters
-  numerical_vars:
-  - DV_R
-  - DA_R
-  - AV_R
-  - AA_R
-  - PM_R
-
-  # Data validation ranges
-feature_ranges:
-  DV_R:
-    min: 200
-    max: 500
-  DA_R:
-    min: 5000
-    max: 15000
-  AV_R:
-    min: 200
-    max: 600
-  AA_R:
-    min: 3000
-    max: 12000
-  PM_R:
-    min: 7000
-    max: 12000
+# Model Configuration
+model_config:
+  # Target variable
+  target: FIN_JGMT
   
+  # Features for training
+  features:
+    - DV_R
+    - DA_R
+    - AV_R
+    - AA_R
+    - PM_R
+  
+  # Numerical variables
+  numerical_vars:
+    - DV_R
+    - DA_R
+    - AV_R
+    - AA_R
+    - PM_R
+  
+  # Model parameters
+  test_size: 0.2
+  random_state: 42
+  
+  # CatBoost parameters
+  catboost_params:
+    iterations: 1000
+    learning_rate: 0.1
+    depth: 6
+    l2_leaf_reg: 3
+    border_count: 128
+    thread_count: -1
+    random_seed: 42
+    verbose: False
+    eval_metric: 'AUC'
+    early_stopping_rounds: 100
+  
+  # Data validation ranges
+  feature_ranges:
+    DV_R:
+      min: 200
+      max: 500
+    DA_R:
+      min: 5000
+      max: 15000
+    AV_R:
+      min: 200
+      max: 600
+    AA_R:
+      min: 3000
+      max: 12000
+    PM_R:
+      min: 7000
+      max: 12000
