@@ -1,7 +1,7 @@
 from flask import Flask
 
-from api.config import get_logger 
-from api.controller import prediction_app
+from catboost_ml.packages.ml_api.api.config import get_logger 
+from catboost_ml.packages.ml_api.api.controller import prediction_app
 
 _logger = get_logger(logger_name=__name__)  
 

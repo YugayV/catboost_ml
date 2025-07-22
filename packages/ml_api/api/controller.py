@@ -39,8 +39,8 @@ except ImportError as e:
     else:
         raise e
 
-from api.config import get_logger
-from api.validation import validate_inputs
+from catboost_ml.packages.ml_api.api.config import get_logger
+from catboost_ml.packages.ml_api.api.validation import validate_inputs
 
 # Import version directly to avoid circular import
 api_version = "0.1.0"
