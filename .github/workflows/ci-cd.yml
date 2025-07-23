@@ -1,0 +1,275 @@
+name: Complete CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'  # Nightly builds
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  SERVICE_NAME: catboost-api
+  REGION: asia-northeast3
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # Code Quality and Security
+  code-quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        check: [formatting, linting, security, typing]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install black isort flake8 bandit safety mypy
+        pip install -r requirements/requirements.txt
+    
+    - name: Code formatting (Black)
+      if: matrix.check == 'formatting'
+      run: black --check --diff .
+    
+    - name: Import sorting (isort)
+      if: matrix.check == 'formatting'
+      run: isort --check-only --diff .
+    
+    - name: Linting (flake8)
+      if: matrix.check == 'linting'
+      run: flake8 .
+    
+    - name: Security check (Bandit)
+      if: matrix.check == 'security'
+      run: bandit -r classification_model/ packages/ -f json -o bandit-report.json
+    
+    - name: Dependency security (Safety)
+      if: matrix.check == 'security'
+      run: safety check --json --output safety-report.json
+    
+    - name: Type checking (MyPy)
+      if: matrix.check == 'typing'
+      run: mypy classification_model/ --ignore-missing-imports
+    
+    - name: Upload security reports
+      if: matrix.check == 'security'
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json
+
+  # Model Testing
+  test-model:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements*.txt') }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements/requirements.txt
+        pip install -r requirements/test_requirements.txt
+        pip install .
+    
+    - name: Run model tests
+      run: |
+        pytest tests/ -v --cov=classification_model --cov-report=xml --cov-report=html
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+    
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-${{ matrix.python-version }}
+        path: htmlcov/
+
+  # API Testing
+  test-api:
+    runs-on: ubuntu-latest
+    needs: test-model
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements/requirements.txt
+        pip install -r requirements/test_requirements.txt
+        pip install .
+    
+    - name: Start API server
+      run: |
+        cd packages/ml_api
+        python run.py &
+        sleep 15
+    
+    - name: Test API endpoints
+      run: |
+        pip install requests
+        python examples/test_api.py
+    
+    - name: API load testing
+      run: |
+        pip install locust
+        # Add load testing commands here
+
+  # Docker Build and Test
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: [test-model, test-api]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        tags: catboost-api:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Test Docker image
+      run: |
+        docker run -d -p 5000:5000 --name test-container catboost-api:${{ github.sha }}
+        sleep 15
+        curl -f http://localhost:5000/health || exit 1
+        docker stop test-container
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: catboost-api:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Deploy to Google Cloud Run
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Configure Docker
+      run: gcloud auth configure-docker
+    
+    - name: Build and push Docker image
+      run: |
+        docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME:${{ github.sha }} .
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:${{ github.sha }}
+    
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy $SERVICE_NAME \
+          --image gcr.io/$PROJECT_ID/$SERVICE_NAME:${{ github.sha }} \
+          --platform managed \
+          --region $REGION \
+          --allow-unauthenticated \
+          --memory 2Gi \
+          --cpu 2 \
+          --max-instances 10 \
+          --set-env-vars="MODEL_VERSION=${{ github.sha }}"
+    
+    - name: Get service URL
+      id: get-url
+      run: |
+        URL=$(gcloud run services describe $SERVICE_NAME --region=$REGION --format='value(status.url)')
+        echo "SERVICE_URL=$URL" >> $GITHUB_OUTPUT
+    
+    - name: Integration tests
+      run: |
+        sleep 30  # Wait for deployment
+        pip install requests
+        export SERVICE_URL=${{ steps.get-url.outputs.SERVICE_URL }}
+        python tests/integration_tests.py
+
+  # Performance Monitoring
+  monitor:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Performance monitoring
+      run: |
+        pip install requests psutil
+        python examples/production_monitoring.py
+    
+    - name: Slack notification
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+

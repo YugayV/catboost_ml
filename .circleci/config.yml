@@ -1,0 +1,332 @@
+version: 2.1
+
+orbs: 
+  python: cicleci/python@2.1.1
+  gcp-cli: circleci/gcp-cli@3.1.0
+  docker: cicleci/docker@2.2.0
+  slack: circleci/slack@4.12.1
+
+parameters:
+  run-integration-tests: 
+    type: boolean
+    default: false
+
+executors:
+  
+  python-executor: 
+    docker: 
+      - image: cimg/python:3.11
+    working_directory: ~/project
+
+  docker-executor: 
+    docker: 
+      - image: cimg/base:stable
+    working_directory: ~/project
+
+commands:
+
+  install-dependencies: 
+    description: "Install Python dependencies"
+    steps: 
+      - run:
+          name: Install dependencies
+          command: |
+            python -m pip install --upgrade pip 
+            pip install -r catboost_ml/requirements/requirements.txt 
+            pip install -r catboost_ml/requirements/test_requirements.txt
+            pip install -e.
+
+  setup-gcp: 
+    description: "Setup Google Cloud Platform"
+    steps: 
+      - gcp-cli/setup: 
+          gcloud_service_key: GCP_SERVICE_KEY
+          gcloud_project_id: GCP_PROJECT_ID
+      - run: 
+          name: Configure Docker for GCP 
+          command: gcloud auth configure-docker
+
+jobs: 
+  # Code Quality and Security Check
+
+  code-quality: 
+    executor: python-executor
+    steps:
+      - checkout
+      - python/install-packages: 
+          pkg-manager: pip 
+          pip-dependency-file: catboost_ml/requirements/requirements.txt
+      - run: 
+          name: Install development dependencies
+          command: | 
+            pip install black isort flake8 bandit safety mypy
+
+      - run: 
+          name: Code formatting check (Black)
+          command: black --check --diff . 
+      - run: 
+          name: Import sorting check (isort)
+          command: isort --check-only --diff .
+      - run: 
+          name: Linting (flake8)
+          command: flake8 .
+      - run: 
+          name: Security check (Bandit)
+          command: bandit -r classification_model/ packages/ 
+      - run: 
+          name: Dependency Security check (Safety)
+          command: safety check
+      - run: 
+          name: Type checking (MyPy)
+          command: mypy classification_model/ --ignore-missing-imports
+
+  # Model testing 
+
+  test-model: 
+    executor: python-executor
+    parallelism: 4 
+    steps:
+      - checkout
+      - install-dependencies
+      - run: 
+          name: Run model tests
+          command: |
+            pytest tests/ -v --cov=classification_model --cov -report=xml --cov-report=html
+      - run: 
+          name: Upload coverage to Codecov
+          command: | 
+            pip install codecov
+            codecov
+      - store_test_results: 
+          path: test-results 
+      - store_artifacts: 
+          path: htmlcov
+
+
+  # API Testing 
+
+  test-api: 
+    executor: python-executor
+    steps:
+      - checkout
+      - install-dependencies
+      - run: 
+          name: Start API server
+          command: |
+            cd packages/ml_api
+            python run.py &
+            sleep 10
+          background: true
+      - run:
+          name: Test API endpoints
+          command: |
+            pip install requests
+            python examples/test_api.py
+      - run:
+          name: API load testing
+          command: |
+            pip install locust
+            # Add load testing script here
+
+  # Model Package Building
+  build-model-package:
+    executor: python-executor
+    steps:
+      - checkout
+      - install-dependencies
+      - run:
+          name: Build model package
+          command: |
+            python setup.py sdist bdist_wheel
+      - run:
+          name: Check package
+          command: |
+            pip install twine
+            twine check dist/*
+      - store_artifacts:
+          path: dist
+
+  # Docker Image Building and Testing
+  build-docker:
+    executor: docker-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: 20.10.14
+          docker_layer_caching: true
+      - run:
+          name: Build Docker image
+          command: |
+            docker build -t catboost-api:${CIRCLE_SHA1} .
+      - run:
+          name: Test Docker image
+          command: |
+            docker run -d -p 5000:5000 --name test-container catboost-api:${CIRCLE_SHA1}
+            sleep 15
+            curl -f http://localhost:5000/health || exit 1
+            docker stop test-container
+      - run:
+          name: Security scan Docker image
+          command: |
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v $PWD:/root/.cache/ aquasec/trivy:latest image \
+              --exit-code 0 --severity HIGH,CRITICAL catboost-api:${CIRCLE_SHA1}
+
+  # Deploy to Google Cloud Run
+  deploy-to-gcp:
+    executor: python-executor
+    steps:
+      - checkout
+      - setup_remote_docker
+      - setup-gcp
+      - run:
+          name: Build and push Docker image
+          command: |
+            docker build -t gcr.io/${GCP_PROJECT_ID}/catboost-api:${CIRCLE_SHA1} .
+            docker push gcr.io/${GCP_PROJECT_ID}/catboost-api:${CIRCLE_SHA1}
+      - run:
+          name: Deploy to Cloud Run
+          command: |
+            gcloud run deploy catboost-api \
+              --image gcr.io/${GCP_PROJECT_ID}/catboost-api:${CIRCLE_SHA1} \
+              --platform managed \
+              --region asia-northeast3 \
+              --allow-unauthenticated \
+              --memory 2Gi \
+              --cpu 2 \
+              --max-instances 10 \
+              --set-env-vars="MODEL_VERSION=${CIRCLE_SHA1}"
+
+  # Integration Tests
+  integration-tests:
+    executor: python-executor
+    steps:
+      - checkout
+      - install-dependencies
+      - run:
+          name: Run integration tests
+          command: |
+            # Wait for deployment to be ready
+            sleep 60
+            python tests/integration_tests.py
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+
+  # Performance Monitoring
+  performance-monitoring:
+    executor: python-executor
+    steps:
+      - checkout
+      - run:
+          name: Performance monitoring
+          command: |
+            pip install requests psutil
+            python examples/production_monitoring.py
+
+workflows:
+  version: 2
+
+  # Main workflow for all branches
+  main-workflow:
+    jobs:
+      - code-quality
+      - test-model:
+          requires:
+            - code-quality
+      - test-api:
+          requires:
+            - test-model
+      - build-model-package:
+          requires:
+            - test-model
+      - build-docker:
+          requires:
+            - test-api
+            - build-model-package
+
+  # Deployment workflow (main branch only)
+  deploy-workflow:
+    jobs:
+      - code-quality:
+          filters:
+            branches:
+              only: main
+      - test-model:
+          requires:
+            - code-quality
+          filters:
+            branches:
+              only: main
+      - test-api:
+          requires:
+            - test-model
+          filters:
+            branches:
+              only: main
+      - build-docker:
+          requires:
+            - test-api
+          filters:
+            branches:
+              only: main
+      - deploy-to-gcp:
+          requires:
+            - build-docker
+          filters:
+            branches:
+              only: main
+      - integration-tests:
+          requires:
+            - deploy-to-gcp
+          filters:
+            branches:
+              only: main
+      - performance-monitoring:
+          requires:
+            - integration-tests
+          filters:
+            branches:
+              only: main
+
+  # Nightly workflow for comprehensive testing
+  nightly:
+    triggers:
+      - schedule:
+          cron: "0 2 * * *"
+          filters:
+            branches:
+              only: main
+    jobs:
+      - test-model
+      - test-api:
+          requires:
+            - test-model
+      - build-docker:
+          requires:
+            - test-api
+      - performance-monitoring:
+          requires:
+            - build-docker
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
